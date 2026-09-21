@@ -39,6 +39,7 @@ class _PdfStamperScreenState extends State<PdfStamperScreen> {
   String _status = 'Select a PDF file to stamp signature';
   bool _isProcessing = false;
   String? _outputPath;
+  String? _pendingPdfPath;
 
   Future<void> _pickAndStampPdf() async {
     setState(() {
@@ -47,11 +48,9 @@ class _PdfStamperScreenState extends State<PdfStamperScreen> {
     });
 
     try {
-      // Request storage permission
       await Permission.storage.request();
       await Permission.manageExternalStorage.request();
 
-      // Pick PDF file
       FilePickerResult? result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['pdf'],
@@ -66,12 +65,96 @@ class _PdfStamperScreenState extends State<PdfStamperScreen> {
       }
 
       String inputPath = result.files.single.path!;
+      
+      // Check if PDF is password protected
+      bool isEncrypted = await _checkIfEncrypted(inputPath);
+      
+      if (isEncrypted) {
+        // Show password dialog
+        _pendingPdfPath = inputPath;
+        _showPasswordDialog();
+      } else {
+        _processPdf(inputPath, '');
+      }
+    } catch (e) {
       setState(() {
-        _status = 'Processing: ${result.files.single.name}\nPlease wait...';
+        _status = '✗ Error: $e';
+        _isProcessing = false;
       });
+    }
+  }
 
-      // Stamp the PDF
-      String? outputPath = await _stampSignature(inputPath);
+  Future<bool> _checkIfEncrypted(String path) async {
+    try {
+      File file = File(path);
+      Uint8List bytes = await file.readAsBytes();
+      PdfDocument document = PdfDocument(inputBytes: bytes);
+      document.dispose();
+      return false;
+    } catch (e) {
+      if (e.toString().contains('password') || e.toString().contains('encrypted')) {
+        return true;
+      }
+      return false;
+    }
+  }
+
+  void _showPasswordDialog() {
+    TextEditingController passwordController = TextEditingController();
+    
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Password Protected PDF'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('This PDF is password protected. Please enter the password:'),
+              const SizedBox(height: 16),
+              TextField(
+                controller: passwordController,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Password',
+                  border: OutlineInputBorder(),
+                  prefixIcon: Icon(Icons.lock),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                setState(() {
+                  _status = 'Cancelled';
+                  _isProcessing = false;
+                });
+              },
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _processPdf(_pendingPdfPath!, passwordController.text);
+              },
+              child: const Text('Unlock'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _processPdf(String inputPath, String password) async {
+    setState(() {
+      _status = 'Processing...\nPlease wait...';
+    });
+
+    try {
+      String? outputPath = await _stampSignature(inputPath, password);
 
       if (outputPath != null) {
         setState(() {
@@ -93,34 +176,32 @@ class _PdfStamperScreenState extends State<PdfStamperScreen> {
     }
   }
 
-  Future<String?> _stampSignature(String inputPath) async {
+  Future<String?> _stampSignature(String inputPath, String password) async {
     try {
-      // Read input PDF
       File inputFile = File(inputPath);
       Uint8List bytes = await inputFile.readAsBytes();
 
-      // Load PDF document
-      PdfDocument document = PdfDocument(inputBytes: bytes);
+      PdfDocument document;
+      
+      // Try to open with password if provided
+      if (password.isNotEmpty) {
+        document = PdfDocument(inputBytes: bytes, password: password);
+      } else {
+        document = PdfDocument(inputBytes: bytes);
+      }
       
       bool modified = false;
 
-      // Iterate through all pages
       for (int i = 0; i < document.pages.count; i++) {
         PdfPage page = document.pages[i];
         
-        // Get annotations (signature fields)
         if (page.annotations.count > 0) {
           for (int j = 0; j < page.annotations.count; j++) {
             PdfAnnotation annotation = page.annotations[j];
             
-            // Check if it's a signature field
             if (annotation is PdfSignatureField) {
-              // Get bounds of signature field
               Rect bounds = annotation.bounds;
-              
-              // Draw green tick mark
               _drawTickMark(page.graphics, bounds);
-              
               modified = true;
             }
           }
@@ -132,7 +213,6 @@ class _PdfStamperScreenState extends State<PdfStamperScreen> {
         return null;
       }
 
-      // Save to output file
       Directory? outputDir = await getExternalStorageDirectory();
       if (outputDir == null) {
         outputDir = await getApplicationDocumentsDirectory();
@@ -142,13 +222,15 @@ class _PdfStamperScreenState extends State<PdfStamperScreen> {
       String outputPath = '${outputDir.path}/$fileName';
 
       File outputFile = File(outputPath);
+      
+      // Save without password
       await outputFile.writeAsBytes(await document.save());
       document.dispose();
 
       return outputPath;
     } catch (e) {
       print('Error stamping PDF: $e');
-      return null;
+      throw Exception('Failed to process PDF: $e');
     }
   }
 
@@ -159,7 +241,6 @@ class _PdfStamperScreenState extends State<PdfStamperScreen> {
     double centerX = bounds.left + w / 2;
     double centerY = bounds.top + h / 2;
     
-    // Tick mark points (relative to signature field)
     double p1x = centerX - w * 0.12;
     double p1y = centerY;
     double p2x = centerX - w * 0.02;
@@ -167,12 +248,10 @@ class _PdfStamperScreenState extends State<PdfStamperScreen> {
     double p3x = centerX + w * 0.14;
     double p3y = centerY - h * 0.26;
 
-    // Draw black outline
     PdfPen outlinePen = PdfPen(PdfColor(0, 0, 0), width: w * 0.065);
     graphics.drawLine(outlinePen, Offset(p1x, p1y), Offset(p2x, p2y));
     graphics.drawLine(outlinePen, Offset(p2x, p2y), Offset(p3x, p3y));
 
-    // Draw green tick
     PdfPen greenPen = PdfPen(PdfColor(0, 153, 38), width: w * 0.05);
     graphics.drawLine(greenPen, Offset(p1x, p1y), Offset(p2x, p2y));
     graphics.drawLine(greenPen, Offset(p2x, p2y), Offset(p3x, p3y));
@@ -202,23 +281,15 @@ class _PdfStamperScreenState extends State<PdfStamperScreen> {
                 padding: const EdgeInsets.all(16.0),
                 child: Column(
                   children: [
-                    const Icon(
-                      Icons.edit_document,
-                      size: 64,
-                      color: Colors.green,
-                    ),
+                    const Icon(Icons.edit_document, size: 64, color: Colors.green),
                     const SizedBox(height: 16),
-                    Text(
-                      'PDF Signature Stamper',
-                      style: Theme.of(context).textTheme.headlineSmall,
-                      textAlign: TextAlign.center,
-                    ),
+                    Text('PDF Signature Stamper',
+                        style: Theme.of(context).textTheme.headlineSmall,
+                        textAlign: TextAlign.center),
                     const SizedBox(height: 8),
-                    Text(
-                      'Stamp green tick on PDF signature fields',
-                      style: Theme.of(context).textTheme.bodyMedium,
-                      textAlign: TextAlign.center,
-                    ),
+                    Text('Stamp green tick on PDF signature fields',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                        textAlign: TextAlign.center),
                   ],
                 ),
               ),
@@ -227,16 +298,10 @@ class _PdfStamperScreenState extends State<PdfStamperScreen> {
             ElevatedButton.icon(
               onPressed: _isProcessing ? null : _pickAndStampPdf,
               icon: _isProcessing
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
+                  ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
                   : const Icon(Icons.upload_file),
               label: Text(_isProcessing ? 'Processing...' : 'Select PDF File'),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 16),
-              ),
+              style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 16)),
             ),
             const SizedBox(height: 24),
             Expanded(
@@ -246,20 +311,12 @@ class _PdfStamperScreenState extends State<PdfStamperScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text(
-                        'Status:',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
-                        ),
-                      ),
+                      const Text('Status:',
+                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                       const SizedBox(height: 8),
                       Expanded(
                         child: SingleChildScrollView(
-                          child: Text(
-                            _status,
-                            style: const TextStyle(fontSize: 14),
-                          ),
+                          child: Text(_status, style: const TextStyle(fontSize: 14)),
                         ),
                       ),
                     ],
