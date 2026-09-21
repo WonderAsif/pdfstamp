@@ -1,3 +1,6 @@
+import 'dart:io';
+import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 Future<void> _processPdf(String inputPath, String password) async {
   setState(() {
     _status = 'Uploading to server...';
