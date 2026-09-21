@@ -66,11 +66,9 @@ class _PdfStamperScreenState extends State<PdfStamperScreen> {
 
       String inputPath = result.files.single.path!;
       
-      // Check if PDF is password protected
       bool isEncrypted = await _checkIfEncrypted(inputPath);
       
       if (isEncrypted) {
-        // Show password dialog
         _pendingPdfPath = inputPath;
         _showPasswordDialog();
       } else {
@@ -92,10 +90,7 @@ class _PdfStamperScreenState extends State<PdfStamperScreen> {
       document.dispose();
       return false;
     } catch (e) {
-      if (e.toString().contains('password') || e.toString().contains('encrypted')) {
-        return true;
-      }
-      return false;
+      return true;
     }
   }
 
@@ -183,7 +178,6 @@ class _PdfStamperScreenState extends State<PdfStamperScreen> {
 
       PdfDocument document;
       
-      // Try to open with password if provided
       if (password.isNotEmpty) {
         document = PdfDocument(inputBytes: bytes, password: password);
       } else {
@@ -192,16 +186,45 @@ class _PdfStamperScreenState extends State<PdfStamperScreen> {
       
       bool modified = false;
 
+      // Iterate through all pages
       for (int i = 0; i < document.pages.count; i++) {
         PdfPage page = document.pages[i];
         
+        // Check for annotations (signature fields)
         if (page.annotations.count > 0) {
           for (int j = 0; j < page.annotations.count; j++) {
             PdfAnnotation annotation = page.annotations[j];
             
-            if (annotation is PdfSignatureField) {
+            // Check if it's a signature field
+            if (annotation is PdfSignatureField || 
+                annotation.toString().contains('Signature') ||
+                _isSignatureField(annotation)) {
+              
               Rect bounds = annotation.bounds;
+              
+              // Scrub the appearance - change text and colors
+              _scrubAppearance(annotation);
+              
+              // Draw the tick mark
               _drawTickMark(page.graphics, bounds);
+              
+              modified = true;
+            }
+          }
+        }
+        
+        // Also check for form fields (signature fields are form fields)
+        if (document.form != null && document.form.fields.count > 0) {
+          for (int j = 0; j < document.form.fields.count; j++) {
+            PdfField field = document.form.fields[j];
+            
+            if (field is PdfSignatureField) {
+              // Get the page and bounds
+              Rect bounds = field.bounds;
+              
+              // Draw tick on the page where signature field is located
+              _drawTickMark(page.graphics, bounds);
+              
               modified = true;
             }
           }
@@ -222,8 +245,6 @@ class _PdfStamperScreenState extends State<PdfStamperScreen> {
       String outputPath = '${outputDir.path}/$fileName';
 
       File outputFile = File(outputPath);
-      
-      // Save without password
       await outputFile.writeAsBytes(await document.save());
       document.dispose();
 
@@ -234,25 +255,64 @@ class _PdfStamperScreenState extends State<PdfStamperScreen> {
     }
   }
 
+  bool _isSignatureField(PdfAnnotation annotation) {
+    // Check various ways to identify signature fields
+    try {
+      String annotString = annotation.toString().toLowerCase();
+      return annotString.contains('sig') || 
+             annotString.contains('signature') ||
+             annotation is PdfSignatureField;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  void _scrubAppearance(PdfAnnotation annotation) {
+    try {
+      // Try to modify the appearance - this is complex in Flutter
+      // Syncfusion PDF doesn't directly expose appearance stream editing
+      // But we can flatten the annotation which removes the "Not Verified" text
+      
+      // Set flags to make it appear as valid
+      annotation.flatten = true;
+    } catch (e) {
+      print('Error scrubbing appearance: $e');
+    }
+  }
+
   void _drawTickMark(PdfGraphics graphics, Rect bounds) {
     double w = bounds.width;
     double h = bounds.height;
     
-    double centerX = bounds.left + w / 2;
-    double centerY = bounds.top + h / 2;
-    
-    double p1x = centerX - w * 0.12;
-    double p1y = centerY;
-    double p2x = centerX - w * 0.02;
-    double p2y = centerY + h * 0.23;
-    double p3x = centerX + w * 0.14;
-    double p3y = centerY - h * 0.26;
+    // Calculate points based on original Python code percentages
+    double p1x = bounds.left + w * 0.38;
+    double p1y = bounds.top + h * 0.45;
+    double p2x = bounds.left + w * 0.48;
+    double p2y = bounds.top + h * 0.22;
+    double p3x = bounds.left + w * 0.64;
+    double p3y = bounds.top + h * 0.76;
 
-    PdfPen outlinePen = PdfPen(PdfColor(0, 0, 0), width: w * 0.065);
+    double greenW = w * 0.05;
+    double outlineW = greenW + (w * 0.015);
+    double shadowX = w * 0.015;
+    double shadowY = h * 0.025;
+
+    // Draw shadow (black outline)
+    PdfPen shadowPen = PdfPen(PdfColor(0, 0, 0), width: outlineW);
+    graphics.drawLine(shadowPen, 
+      Offset(p1x + shadowX, p1y + shadowY), 
+      Offset(p2x + shadowX, p2y + shadowY));
+    graphics.drawLine(shadowPen, 
+      Offset(p2x + shadowX, p2y + shadowY), 
+      Offset(p3x + shadowX, p3y + shadowY));
+
+    // Draw black outline
+    PdfPen outlinePen = PdfPen(PdfColor(0, 0, 0), width: outlineW);
     graphics.drawLine(outlinePen, Offset(p1x, p1y), Offset(p2x, p2y));
     graphics.drawLine(outlinePen, Offset(p2x, p2y), Offset(p3x, p3y));
 
-    PdfPen greenPen = PdfPen(PdfColor(0, 153, 38), width: w * 0.05);
+    // Draw green tick
+    PdfPen greenPen = PdfPen(PdfColor(0, 153, 38), width: greenW);
     graphics.drawLine(greenPen, Offset(p1x, p1y), Offset(p2x, p2y));
     graphics.drawLine(greenPen, Offset(p2x, p2y), Offset(p3x, p3y));
   }
